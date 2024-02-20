@@ -111,6 +111,38 @@ func (s *Subscription) delete(ctx context.Context) error {
 	}
 }
 
+func (s *Subscription) ModifySubscription(ctx context.Context, params SubscriptionParameters) (*ua.ModifySubscriptionResponse, error) {
+	stats.Subscription().Add("ModifySubscription", 1)
+
+	params.setDefaults()
+	req := &ua.ModifySubscriptionRequest{
+		SubscriptionID:              s.SubscriptionID,
+		RequestedPublishingInterval: float64(params.Interval.Milliseconds()),
+		RequestedLifetimeCount:      params.LifetimeCount,
+		RequestedMaxKeepAliveCount:  params.MaxKeepAliveCount,
+		MaxNotificationsPerPublish:  params.MaxNotificationsPerPublish,
+		Priority:                    params.Priority,
+	}
+
+	var res *ua.ModifySubscriptionResponse
+	err := s.c.Send(ctx, req, func(v interface{}) error {
+		return safeAssign(v, &res)
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// update subscription parameters
+	s.params = &params
+	// update revised subscription parameters
+	s.RevisedPublishingInterval = time.Duration(res.RevisedPublishingInterval) * time.Millisecond
+	s.RevisedLifetimeCount = res.RevisedLifetimeCount
+	s.RevisedMaxKeepAliveCount = res.RevisedMaxKeepAliveCount
+
+	return res, nil
+}
+
 func (s *Subscription) Monitor(ctx context.Context, ts ua.TimestampsToReturn, items ...*ua.MonitoredItemCreateRequest) (*ua.CreateMonitoredItemsResponse, error) {
 	stats.Subscription().Add("Monitor", 1)
 	stats.Subscription().Add("MonitoredItems", int64(len(items)))
@@ -216,6 +248,34 @@ func (s *Subscription) ModifyMonitoredItems(ctx context.Context, ts ua.Timestamp
 		item.res.FilterResult = res.FilterResult
 	}
 	s.itemsMu.Unlock()
+
+	return res, nil
+}
+
+func (s *Subscription) SetMonitoringMode(ctx context.Context, monitoringMode ua.MonitoringMode, monitoredItemIDs ...uint32) (*ua.SetMonitoringModeResponse, error) {
+	stats.Subscription().Add("SetMonitoringMode", 1)
+	stats.Subscription().Add("SetMonitoringModeMonitoredItems", int64(len(monitoredItemIDs)))
+
+	s.itemsMu.Lock()
+	for _, id := range monitoredItemIDs {
+		if _, exists := s.items[id]; !exists {
+			return nil, fmt.Errorf("sub %d: cannot set monitoring mode for unknown monitored item id: %d", s.SubscriptionID, id)
+		}
+	}
+	s.itemsMu.Unlock()
+
+	req := &ua.SetMonitoringModeRequest{
+		SubscriptionID:   s.SubscriptionID,
+		MonitoringMode:   monitoringMode,
+		MonitoredItemIDs: monitoredItemIDs,
+	}
+	var res *ua.SetMonitoringModeResponse
+	err := s.c.Send(ctx, req, func(v interface{}) error {
+		return safeAssign(v, &res)
+	})
+	if err != nil {
+		return nil, err
+	}
 
 	return res, nil
 }
